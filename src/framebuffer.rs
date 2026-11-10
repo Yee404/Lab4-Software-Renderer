@@ -6,17 +6,21 @@ pub struct Framebuffer {
     image: Image,
     background_color: Vector3,
     texture: Option<Texture2D>,
+    depth_buffer: Vec<f32>,
 }
 
 impl Framebuffer {
     pub fn new(width: u32, height: u32) -> Self {
         let image = Image::gen_image_color(width as i32, height as i32, Color::BLACK);
+        let buffer_size = (width * height) as usize;
+        let depth_buffer = vec![f32::INFINITY; buffer_size]; // Initialize with far plane
         Framebuffer {
             width,
             height,
             image,
             background_color: Vector3::zero(),
             texture: None,
+            depth_buffer,
         }
     }
 
@@ -32,18 +36,30 @@ impl Framebuffer {
             255,
         );
         self.image.clear_background(bg_color);
+
+        // Clear depth buffer to far plane
+        self.depth_buffer.fill(f32::INFINITY);
     }
 
-    pub fn point(&mut self, x: i32, y: i32, color: Vector3) {
+    pub fn point(&mut self, x: i32, y: i32, color: Vector3, depth: f32) -> bool {
         if x >= 0 && y >= 0 && x < self.width as i32 && y < self.height as i32 {
-            let pixel_color = Color::new(
-                (color.x.clamp(0.0, 1.0) * 255.0) as u8,
-                (color.y.clamp(0.0, 1.0) * 255.0) as u8,
-                (color.z.clamp(0.0, 1.0) * 255.0) as u8,
-                255,
-            );
-            self.image.draw_pixel(x, y, pixel_color);
+            let index = (y * self.width as i32 + x) as usize;
+
+            // Depth test: only draw if this fragment is closer
+            if depth < self.depth_buffer[index] {
+                self.depth_buffer[index] = depth;
+
+                let pixel_color = Color::new(
+                    (color.x.clamp(0.0, 1.0) * 255.0) as u8,
+                    (color.y.clamp(0.0, 1.0) * 255.0) as u8,
+                    (color.z.clamp(0.0, 1.0) * 255.0) as u8,
+                    255,
+                );
+                self.image.draw_pixel(x, y, pixel_color);
+                return true;
+            }
         }
+        false
     }
 
     pub fn set_background_color(&mut self, color: Vector3) {

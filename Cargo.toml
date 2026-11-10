@@ -10,3 +10,4 @@ debug = false
 [dependencies]
 raylib = "5.5.1"
 tobj = "4.0.2"
+noise = "0.9"

@@ -1,80 +1,43 @@
 // main.rs
 
-mod framebuffer;
-mod triangle;
-mod line;
-mod vertex;
+mod camera;
 mod fragment;
-mod shaders;
-mod obj;
+mod framebuffer;
+mod light;
+mod line;
 mod matrix;
+mod obj;
+mod shaders;
+mod triangle;
+mod vertex;
 
-use crate::matrix::new_matrix4;
+use crate::camera::Camera;
+use crate::light::Light;
+use crate::matrix::{create_model_matrix, create_projection_matrix, create_viewport_matrix};
 use framebuffer::Framebuffer;
-use vertex::Vertex;
-use triangle::triangle;
-use shaders::vertex_shader;
 use obj::Obj;
 use raylib::prelude::*;
+use shaders::{fragment_shader, vertex_shader};
+use std::f32::consts::PI;
 use std::thread;
 use std::time::Duration;
-use std::f32::consts::PI;
+use triangle::triangle;
+use vertex::Vertex;
 
 pub struct Uniforms {
     pub model_matrix: Matrix,
+    pub view_matrix: Matrix,
+    pub projection_matrix: Matrix,
+    pub viewport_matrix: Matrix,
+    pub time: f32,
 }
 
-fn create_model_matrix(translation: Vector3, scale: f32, rotation: Vector3) -> Matrix {
-    let (sin_x, cos_x) = rotation.x.sin_cos();
-    let (sin_y, cos_y) = rotation.y.sin_cos();
-    let (sin_z, cos_z) = rotation.z.sin_cos();
-
-    // Rotation around the X-axis
-    let rotation_matrix_x = new_matrix4(
-        1.0, 0.0,    0.0,    0.0,
-        0.0, cos_x,  -sin_x, 0.0,
-        0.0, sin_x,  cos_x,  0.0,
-        0.0, 0.0,    0.0,    1.0
-    );
-
-    // Rotation around the Y-axis
-    let rotation_matrix_y = new_matrix4(
-        cos_y,  0.0, sin_y, 0.0,
-        0.0,    1.0, 0.0,   0.0,
-        -sin_y, 0.0, cos_y, 0.0,
-        0.0,    0.0, 0.0,   1.0
-    );
-
-    // Rotation around the Z-axis
-    let rotation_matrix_z = new_matrix4(
-        cos_z, -sin_z, 0.0, 0.0,
-        sin_z, cos_z,  0.0, 0.0,
-        0.0,   0.0,    1.0, 0.0,
-        0.0,   0.0,    0.0, 1.0
-    );
-
-    let rotation_matrix = rotation_matrix_z * rotation_matrix_y * rotation_matrix_x;
-
-    // Scaling matrix
-    let scale_matrix = new_matrix4(
-        scale, 0.0,   0.0,   0.0,
-        0.0,   scale, 0.0,   0.0,
-        0.0,   0.0,   scale, 0.0,
-        0.0,   0.0,   0.0,   1.0
-    );
-
-    // Translation matrix
-    let translation_matrix = new_matrix4(
-        1.0, 0.0, 0.0, translation.x,
-        0.0, 1.0, 0.0, translation.y,
-        0.0, 0.0, 1.0, translation.z,
-        0.0, 0.0, 0.0, 1.0
-    );
-
-    scale_matrix * rotation_matrix * translation_matrix
-}
-
-fn render(framebuffer: &mut Framebuffer, uniforms: &Uniforms, vertex_array: &[Vertex]) {
+fn render(
+    framebuffer: &mut Framebuffer,
+    uniforms: &Uniforms,
+    vertex_array: &[Vertex],
+    light: &Light,
+) {
     // Vertex Shader Stage
     let mut transformed_vertices = Vec::with_capacity(vertex_array.len());
     for vertex in vertex_array {
@@ -103,15 +66,19 @@ fn render(framebuffer: &mut Framebuffer, uniforms: &Uniforms, vertex_array: &[Ve
     // Rasterization Stage
     let mut fragments = Vec::new();
     for tri in &triangles {
-        fragments.extend(triangle(&tri[0], &tri[1], &tri[2]));
+        fragments.extend(triangle(&tri[0], &tri[1], &tri[2], light));
     }
 
     // Fragment Processing Stage
     for fragment in fragments {
+        // Run fragment shader to compute final color
+        let final_color = fragment_shader(&fragment, uniforms);
+
         framebuffer.point(
             fragment.position.x as i32,
             fragment.position.y as i32,
-            fragment.color
+            final_color,
+            fragment.depth,
         );
     }
 }
@@ -122,7 +89,7 @@ fn main() {
 
     let (mut window, thread) = raylib::init()
         .size(window_width, window_height)
-        .title("Laboratorio 4 - Nave OBJ")
+        .title("Proyecto Final")
         .log_level(TraceLogLevel::LOG_WARNING) // Suppress INFO messages
         .build();
 
@@ -132,70 +99,65 @@ fn main() {
     // Initialize the texture inside the framebuffer
     framebuffer.init_texture(&mut window, &thread);
 
-    // ventana mide 800x600, por lo que el centro es (400, 300)
-    let mut translation = Vector3::new(400.0, 300.0, 0.0);
-    let mut rotation = Vector3::new(0.0, 0.0, 0.0);
-    let mut scale = 50.0f32; // Set scale to 1.2
+    // Camera setup
+    let camera_position = Vector3::new(0.0, 2.0, 8.0);
+    let camera_target = Vector3::new(0.0, 0.0, 0.0);
+    let camera_up = Vector3::new(0.0, 1.0, 0.0);
+    let mut camera = Camera::new(camera_position, camera_target, camera_up);
+
+    // Projection setup
+    let fov_y = PI / 3.0; // 60 degrees
+    let aspect = window_width as f32 / window_height as f32;
+    let near = 0.1;
+    let far = 100.0;
+
+    // Model setup (rotating model at origin)
+    let translation = Vector3::new(0.3, 0.2, 0.0);
+    let mut rotation_y = 0.0f32;
+    let rotation_speed = 0.005; // Radians per frame
+    let scale = 0.25f32;
+
+    // Light setup
+    let light = Light::new(Vector3::new(5.0, 5.0, 5.0));
 
     let obj = Obj::load("assets/models/nave.obj").expect("Failed to load obj");
     let vertex_array = obj.get_vertex_array();
 
+    let mut elapsed_time = 0.0f32;
+
     while !window.window_should_close() {
-        handle_input(&mut window, &mut translation, &mut rotation, &mut scale);
+        // Get delta time from Raylib
+        let delta_time = window.get_frame_time();
+        elapsed_time += delta_time;
+
+        // Process camera input
+        camera.process_input(&window);
+
+        // Update model rotation
+        rotation_y += rotation_speed;
 
         framebuffer.clear();
 
+        let rotation = Vector3::new(0.0, rotation_y, 0.0);
         let model_matrix = create_model_matrix(translation, scale, rotation);
-        let uniforms = Uniforms { model_matrix };
+        let view_matrix = camera.get_view_matrix();
+        let projection_matrix = create_projection_matrix(fov_y, aspect, near, far);
+        let viewport_matrix =
+            create_viewport_matrix(0.0, 0.0, window_width as f32, window_height as f32);
 
-        render(&mut framebuffer, &uniforms, &vertex_array);
+        let uniforms = Uniforms {
+            model_matrix,
+            view_matrix,
+            projection_matrix,
+            viewport_matrix,
+            time: elapsed_time,
+        };
+
+        render(&mut framebuffer, &uniforms, &vertex_array, &light);
 
         // Call the encapsulated swap_buffers function
         framebuffer.swap_buffers(&mut window, &thread);
 
         thread::sleep(Duration::from_millis(16));
-    }
-}
-
-fn handle_input(window: &mut RaylibHandle, translation: &mut Vector3, rotation: &mut Vector3, scale: &mut f32)
-{
-
-    let rotation_speed = PI / 180.0;
-
-    if window.is_key_down(KeyboardKey::KEY_RIGHT) {
-        translation.x += 10.0;
-    }
-    if window.is_key_down(KeyboardKey::KEY_LEFT) {
-        translation.x -= 10.0;
-    }
-    if window.is_key_down(KeyboardKey::KEY_UP) {
-        translation.y -= 10.0;
-    }
-    if window.is_key_down(KeyboardKey::KEY_DOWN) {
-        translation.y += 10.0;
-    }
-    if window.is_key_down(KeyboardKey::KEY_S) {
-        *scale += 0.1;
-    }
-    if window.is_key_down(KeyboardKey::KEY_A) {
-        *scale -= 0.1;
-    }
-    if window.is_key_down(KeyboardKey::KEY_Q) {
-        rotation.x -= rotation_speed;
-    }
-    if window.is_key_down(KeyboardKey::KEY_W) {
-        rotation.x += rotation_speed;
-    }
-    if window.is_key_down(KeyboardKey::KEY_E) {
-        rotation.y -= rotation_speed;
-    }
-    if window.is_key_down(KeyboardKey::KEY_R) {
-        rotation.y += rotation_speed;
-    }
-    if window.is_key_down(KeyboardKey::KEY_T) {
-        rotation.z -= rotation_speed;
-    }
-    if window.is_key_down(KeyboardKey::KEY_Y) {
-        rotation.z += rotation_speed;
     }
 }
