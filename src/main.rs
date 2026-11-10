@@ -122,7 +122,7 @@ fn main() {
 
     let (mut window, thread) = raylib::init()
         .size(window_width, window_height)
-        .title("Rust Graphics - Renderer Example")
+        .title("Laboratorio 4 - Nave OBJ")
         .log_level(TraceLogLevel::LOG_WARNING) // Suppress INFO messages
         .build();
 
@@ -132,11 +132,12 @@ fn main() {
     // Initialize the texture inside the framebuffer
     framebuffer.init_texture(&mut window, &thread);
 
-    let mut translation = Vector3::new(300.0, 300.0, 0.0);
+    // ventana mide 800x600, por lo que el centro es (400, 300)
+    let mut translation = Vector3::new(400.0, 300.0, 0.0);
     let mut rotation = Vector3::new(0.0, 0.0, 0.0);
     let mut scale = 50.0f32; // Set scale to 1.2
 
-    let obj = Obj::load("assets/models/anya.obj").expect("Failed to load obj");
+    let obj = Obj::load("assets/models/nave.obj").expect("Failed to load obj");
     let vertex_array = obj.get_vertex_array();
 
     while !window.window_should_close() {
@@ -156,7 +157,11 @@ fn main() {
     }
 }
 
-fn handle_input(window: &mut RaylibHandle, translation: &mut Vector3, rotation: &mut Vector3, scale: &mut f32) {
+fn handle_input(window: &mut RaylibHandle, translation: &mut Vector3, rotation: &mut Vector3, scale: &mut f32)
+{
+
+    let rotation_speed = PI / 180.0;
+
     if window.is_key_down(KeyboardKey::KEY_RIGHT) {
         translation.x += 10.0;
     }
@@ -176,21 +181,21 @@ fn handle_input(window: &mut RaylibHandle, translation: &mut Vector3, rotation: 
         *scale -= 0.1;
     }
     if window.is_key_down(KeyboardKey::KEY_Q) {
-        rotation.x -= PI / 10.0;
+        rotation.x -= rotation_speed;
     }
     if window.is_key_down(KeyboardKey::KEY_W) {
-        rotation.x += PI / 10.0;
+        rotation.x += rotation_speed;
     }
     if window.is_key_down(KeyboardKey::KEY_E) {
-        rotation.y -= PI / 10.0;
+        rotation.y -= rotation_speed;
     }
     if window.is_key_down(KeyboardKey::KEY_R) {
-        rotation.y += PI / 10.0;
+        rotation.y += rotation_speed;
     }
     if window.is_key_down(KeyboardKey::KEY_T) {
-        rotation.z -= PI / 10.0;
+        rotation.z -= rotation_speed;
     }
     if window.is_key_down(KeyboardKey::KEY_Y) {
-        rotation.z += PI / 10.0;
+        rotation.z += rotation_speed;
     }
 }
