@@ -30,8 +30,26 @@ fn barycentric_coordinates(p_x: f32, p_y: f32, a: &Vertex, b: &Vertex, c: &Verte
     (w1, w2, w3)
 }
 
-pub fn triangle(v1: &Vertex, v2: &Vertex, v3: &Vertex, light: &Light) -> Vec<Fragment> {
+pub fn triangle(
+    v1: &Vertex,
+    v2: &Vertex,
+    v3: &Vertex,
+    light: &Light,
+    base_color: Vector3,
+    framebuffer_width: u32,
+    framebuffer_height: u32,
+) -> Vec<Fragment> {
     let mut fragments = Vec::new();
+
+    if !v1.transformed_position.x.is_finite()
+        || !v1.transformed_position.y.is_finite()
+        || !v2.transformed_position.x.is_finite()
+        || !v2.transformed_position.y.is_finite()
+        || !v3.transformed_position.x.is_finite()
+        || !v3.transformed_position.y.is_finite()
+    {
+        return fragments;
+    }
 
     // === DEMO: Uncomment to show RGB color interpolation ===
     // Assign RGB colors to the three vertices for interpolation demonstration
@@ -39,14 +57,15 @@ pub fn triangle(v1: &Vertex, v2: &Vertex, v3: &Vertex, light: &Light) -> Vec<Fra
     // let color2 = Vector3::new(0.0, 0.0, 1.0); // Blue
     // let color3 = Vector3::new(0.0, 1.0, 0.0); // Green
 
-    // Base gray color for all vertices
-    let base_color = Vector3::new(0.15, 0.75, 0.95);
-
     // Get the bounding box of the triangle
-    let min_x = v1.transformed_position.x.min(v2.transformed_position.x).min(v3.transformed_position.x).floor() as i32;
-    let max_x = v1.transformed_position.x.max(v2.transformed_position.x).max(v3.transformed_position.x).ceil() as i32;
-    let min_y = v1.transformed_position.y.min(v2.transformed_position.y).min(v3.transformed_position.y).floor() as i32;
-    let max_y = v1.transformed_position.y.max(v2.transformed_position.y).max(v3.transformed_position.y).ceil() as i32;
+    let min_x = (v1.transformed_position.x.min(v2.transformed_position.x).min(v3.transformed_position.x).floor() as i32).max(0);
+    let max_x = (v1.transformed_position.x.max(v2.transformed_position.x).max(v3.transformed_position.x).ceil() as i32).min(framebuffer_width as i32 - 1);
+    let min_y = (v1.transformed_position.y.min(v2.transformed_position.y).min(v3.transformed_position.y).floor() as i32).max(0);
+    let max_y = (v1.transformed_position.y.max(v2.transformed_position.y).max(v3.transformed_position.y).ceil() as i32).min(framebuffer_height as i32 - 1);
+
+    if min_x > max_x || min_y > max_y {
+        return fragments;
+    }
 
     // Iterate over each pixel in the bounding box
     for y in min_y..=max_y {
@@ -110,7 +129,7 @@ pub fn triangle(v1: &Vertex, v2: &Vertex, v3: &Vertex, light: &Light) -> Vec<Fra
                 // Calculate per-fragment lighting intensity using interpolated normal (Lambertian shading)
                 let intensity = (normalized_normal.x * light_dir.x
                                + normalized_normal.y * light_dir.y
-                               + normalized_normal.z * light_dir.z).clamp(0.2, 1.0);
+                               + normalized_normal.z * light_dir.z).clamp(0.38, 1.0);
 
                 // Apply shading to base color
                 let shaded_color = Vector3::new(

@@ -1,7 +1,7 @@
 use raylib::prelude::*;
 use crate::vertex::Vertex;
 use crate::fragment::Fragment;
-use crate::Uniforms;
+use crate::{ShaderKind, Uniforms};
 use noise::{NoiseFn, OpenSimplex};
 
 // This function manually multiplies a 4x4 matrix with a 4D vector (in homogeneous coordinates)
@@ -26,6 +26,25 @@ pub fn vertex_shader(vertex: &Vertex, uniforms: &Uniforms) -> Vertex {
   // Apply Model transformation
   let world_position = multiply_matrix_vector4(&uniforms.model_matrix, &position_vec4);
 
+  // Normals use w = 0 so translation has no effect. Transforming them with the
+  // model rotation keeps the illuminated side facing the Sun while objects rotate.
+  let normal_vec4 = Vector4::new(vertex.normal.x, vertex.normal.y, vertex.normal.z, 0.0);
+  let transformed_normal4 = multiply_matrix_vector4(&uniforms.model_matrix, &normal_vec4);
+  let normal_length = (
+      transformed_normal4.x * transformed_normal4.x
+      + transformed_normal4.y * transformed_normal4.y
+      + transformed_normal4.z * transformed_normal4.z
+  ).sqrt();
+  let world_normal = if normal_length > 0.0 {
+      Vector3::new(
+          transformed_normal4.x / normal_length,
+          transformed_normal4.y / normal_length,
+          transformed_normal4.z / normal_length,
+      )
+  } else {
+      vertex.normal
+  };
+
   // Apply View transformation (camera)
   let view_position = multiply_matrix_vector4(&uniforms.view_matrix, &world_position);
 
@@ -33,14 +52,14 @@ pub fn vertex_shader(vertex: &Vertex, uniforms: &Uniforms) -> Vertex {
   let clip_position = multiply_matrix_vector4(&uniforms.projection_matrix, &view_position);
 
   // Perform perspective division to get NDC (Normalized Device Coordinates)
-  let ndc = if clip_position.w != 0.0 {
+  let ndc = if clip_position.w > 0.05 {
       Vector3::new(
           clip_position.x / clip_position.w,
           clip_position.y / clip_position.w,
           clip_position.z / clip_position.w,
       )
   } else {
-      Vector3::new(clip_position.x, clip_position.y, clip_position.z)
+      Vector3::new(f32::NAN, f32::NAN, f32::NAN)
   };
 
   // Apply Viewport transformation to get screen coordinates
@@ -55,12 +74,12 @@ pub fn vertex_shader(vertex: &Vertex, uniforms: &Uniforms) -> Vertex {
 
   // Create a new Vertex with the transformed position
   Vertex {
-    position: vertex.position,
-    normal: vertex.normal,
+    position: Vector3::new(world_position.x, world_position.y, world_position.z),
+    normal: world_normal,
     tex_coords: vertex.tex_coords,
     color: vertex.color,
     transformed_position,
-    transformed_normal: vertex.normal, // Note: Correct normal transformation is more complex
+    transformed_normal: world_normal,
   }
 }
 
@@ -489,25 +508,44 @@ fn shader_animated_clouds(fragment: &Fragment, time: f32) -> Vector3 {
 // === Main Fragment Shader ===
 pub fn fragment_shader(fragment: &Fragment, uniforms: &Uniforms) -> Vector3 {
     let time = uniforms.time;
+    let p = fragment.world_position;
 
-    // Uncomment one of the shader examples below to see different effects!
-
-    // === Animated Shaders ===
-    // shader_random_flicker(fragment, time)
-    // shader_moving_stripes(fragment, time)
-    // shader_pulsing_waves(fragment, time)
-    // shader_rotating_rainbow(fragment, time)
-    // shader_expanding_rings(fragment, time)
-    // shader_breathing(fragment, time)
-
-    // === Noise-based Shaders ===
-    // shader_animated_clouds(fragment, time)  // Clouds that move over time
-    // shader_clouds(fragment, time)           // Static cloud pattern
-
-    // === Multi-Pass Shaders (Combining Multiple Effects) ===
-    shader_water_with_stripes(fragment, time)  // Water gradient + animated stripes
-    // shader_sunset_waves(fragment, time)       // Sunset gradient + pulsing waves
-    // shader_noise_colorshift(fragment, time)   // Noise texture + color shifting
-
-    // shader_base_color(fragment, time) // Default: just show the lighting
+    match uniforms.shader_kind {
+        ShaderKind::Ship => {
+            let accent = (p.z * 5.0 + time * 1.5).sin().abs();
+            Vector3::new(
+                (fragment.color.x + accent * 0.12).clamp(0.0, 1.0),
+                fragment.color.y,
+                fragment.color.z,
+            )
+        }
+        ShaderKind::Sun => {
+            let pulse = 0.88 + (time * 2.4 + p.y * 3.0).sin() * 0.12;
+            Vector3::new(1.0, 0.48 * pulse + 0.18, 0.05 * pulse)
+        }
+        ShaderKind::Terran => {
+            let continents = (p.x * 4.3 + (p.z * 3.7).sin()).sin() * 0.5 + 0.5;
+            Vector3::new(
+                fragment.color.x * (0.65 + continents * 0.35),
+                fragment.color.y * (0.72 + continents * 0.28),
+                fragment.color.z * (1.0 - continents * 0.35),
+            )
+        }
+        ShaderKind::Desert => {
+            let bands = (p.y * 11.0 + p.x * 1.8).sin() * 0.12 + 0.88;
+            Vector3::new(
+                fragment.color.x * bands,
+                fragment.color.y * bands,
+                fragment.color.z * 0.75,
+            )
+        }
+        ShaderKind::Ice => {
+            let cracks = (p.x * 9.0).sin().abs() * (p.z * 7.0).cos().abs();
+            Vector3::new(
+                (fragment.color.x + cracks * 0.18).clamp(0.0, 1.0),
+                (fragment.color.y + cracks * 0.12).clamp(0.0, 1.0),
+                fragment.color.z,
+            )
+        }
+    }
 }
