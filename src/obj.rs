@@ -2,58 +2,64 @@ use crate::vertex::Vertex;
 use raylib::math::{Vector2, Vector3};
 use tobj;
 
-pub struct Obj {
+/// Una pieza (objeto `o` del OBJ) ya expandida a lista de triángulos.
+pub struct ObjPart {
+    pub name: String,
     pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
 }
 
-impl Obj {
-    pub fn load(path: &str) -> Result<Self, tobj::LoadError> {
-        let (models, _materials) = tobj::load_obj(path, &tobj::GPU_LOAD_OPTIONS)?;
+/// Carga un OBJ conservando sus objetos por separado (así cada pieza puede tener su
+/// propio color) y centra TODO el modelo una sola vez: el centro de la caja envolvente
+/// de todos los vértices queda en el origen, de modo que `ship_position` es el centro
+/// real de la nave y rota sobre sí misma.
+pub fn load_centered_parts(path: &str) -> Result<Vec<ObjPart>, tobj::LoadError> {
+    let (models, _materials) = tobj::load_obj(path, &tobj::GPU_LOAD_OPTIONS)?;
 
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
-        for model in models {
-            let mesh = &model.mesh;
-            let num_vertices = mesh.positions.len() / 3;
-
-            for i in 0..num_vertices {
-                let x = mesh.positions[i * 3];
-                let y = mesh.positions[i * 3 + 1];
-                let z = mesh.positions[i * 3 + 2];
-                let position = Vector3::new(x, -y, z);
-
-                let normal = if !mesh.normals.is_empty() {
-                    let nx = mesh.normals[i * 3];
-                    let ny = mesh.normals[i * 3 + 1];
-                    let nz = mesh.normals[i * 3 + 2];
-                    Vector3::new(nx, ny, nz)
-                } else {
-                    Vector3::zero()
-                };
-
-                let tex_coords = if !mesh.texcoords.is_empty() {
-                    let u = mesh.texcoords[i * 2];
-                    let v = mesh.texcoords[i * 2 + 1];
-                    Vector2::new(u, v)
-                } else {
-                    Vector2::zero()
-                };
-
-                vertices.push(Vertex::new(position, normal, tex_coords));
-            }
-            indices.extend_from_slice(&mesh.indices);
+    let mut parts: Vec<ObjPart> = Vec::new();
+    for model in models {
+        let mesh = &model.mesh;
+        let mut vertices = Vec::with_capacity(mesh.indices.len());
+        for &index in &mesh.indices {
+            let i = index as usize;
+            let position = Vector3::new(
+                mesh.positions[i * 3],
+                mesh.positions[i * 3 + 1],
+                mesh.positions[i * 3 + 2],
+            );
+            let normal = if mesh.normals.is_empty() {
+                Vector3::zero()
+            } else {
+                Vector3::new(mesh.normals[i * 3], mesh.normals[i * 3 + 1], mesh.normals[i * 3 + 2])
+            };
+            let tex_coords = if mesh.texcoords.is_empty() {
+                Vector2::zero()
+            } else {
+                Vector2::new(mesh.texcoords[i * 2], mesh.texcoords[i * 2 + 1])
+            };
+            vertices.push(Vertex::new(position, normal, tex_coords));
         }
-
-        Ok(Obj { vertices, indices })
+        parts.push(ObjPart { name: model.name, vertices });
     }
 
-    pub fn get_vertex_array(&self) -> Vec<Vertex> {
-        let mut vertex_array = Vec::new();
-        for &index in &self.indices {
-            vertex_array.push(self.vertices[index as usize].clone());
+    // Centro real del modelo a partir de los límites de todos sus vértices.
+    let mut min = Vector3::new(f32::MAX, f32::MAX, f32::MAX);
+    let mut max = Vector3::new(f32::MIN, f32::MIN, f32::MIN);
+    for part in &parts {
+        for v in &part.vertices {
+            min.x = min.x.min(v.position.x);
+            min.y = min.y.min(v.position.y);
+            min.z = min.z.min(v.position.z);
+            max.x = max.x.max(v.position.x);
+            max.y = max.y.max(v.position.y);
+            max.z = max.z.max(v.position.z);
         }
-        vertex_array
     }
+    let center = (min + max) * 0.5;
+    for part in parts.iter_mut() {
+        for v in part.vertices.iter_mut() {
+            v.position -= center;
+            v.transformed_position = v.position;
+        }
+    }
+    Ok(parts)
 }

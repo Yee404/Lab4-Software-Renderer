@@ -66,7 +66,15 @@ impl Framebuffer {
         self.background_color = color;
     }
 
-    pub fn swap_buffers(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    /// Muestra el framebuffer y dibuja encima líneas de texto 2D (HUD con contadores).
+    /// `flash` ∈ [0, 1]: destello blanco a pantalla completa (explosión y renacimiento).
+    pub fn swap_buffers(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        overlay: &[String],
+        flash: f32,
+    ) {
         if let Some(texture) = &mut self.texture {
             let colors = self.image.get_image_data();
             // Safely cast the &[Color] slice to a &[u8] slice for the update function
@@ -81,6 +89,14 @@ impl Framebuffer {
             let mut d = rl.begin_drawing(thread);
             d.clear_background(Color::BLACK);
             d.draw_texture(texture, 0, 0, Color::WHITE);
+            if flash > 0.0 {
+                let alpha = (flash.clamp(0.0, 1.0) * 255.0) as u8;
+                d.draw_rectangle(0, 0, self.width as i32, self.height as i32, Color::new(255, 255, 255, alpha));
+            }
+            for (i, line) in overlay.iter().enumerate() {
+                d.draw_text(line, 9, 9 + i as i32 * 15, 14, Color::BLACK);
+                d.draw_text(line, 8, 8 + i as i32 * 15, 14, Color::new(230, 240, 255, 255));
+            }
         } else {
             panic!("Framebuffer texture has not been initialized. Call init_texture after creating the RaylibHandle.");
         }

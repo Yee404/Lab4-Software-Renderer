@@ -505,47 +505,297 @@ fn shader_animated_clouds(fragment: &Fragment, time: f32) -> Vector3 {
     )
 }
 
+fn rotate_x(v: Vector3, a: f32) -> Vector3 {
+    let (s, c) = a.sin_cos();
+    Vector3::new(v.x, c * v.y - s * v.z, s * v.y + c * v.z)
+}
+
+fn rotate_y(v: Vector3, a: f32) -> Vector3 {
+    let (s, c) = a.sin_cos();
+    Vector3::new(c * v.x + s * v.z, v.y, -s * v.x + c * v.z)
+}
+
+fn rotate_z(v: Vector3, a: f32) -> Vector3 {
+    let (s, c) = a.sin_cos();
+    Vector3::new(c * v.x - s * v.y, s * v.x + c * v.y, v.z)
+}
+
+/// Posición del fragmento en el sistema del propio cuerpo (esfera de radio ~1).
+/// Se deshace la rotación del model matrix (X·Y·Z), de modo que los patrones del
+/// shader giran junto con el planeta y la rotación sobre su eje se nota.
+fn body_coords(p: Vector3, uniforms: &Uniforms) -> Vector3 {
+    let c = uniforms.object_center;
+    let r = uniforms.object_radius;
+    let rot = uniforms.object_rotation;
+    let q = Vector3::new((p.x - c.x) / r, (p.y - c.y) / r, (p.z - c.z) / r);
+    rotate_z(rotate_y(rotate_x(q, -rot.x), -rot.y), -rot.z)
+}
+
 // === Main Fragment Shader ===
+//
+// Cada planeta usa una técnica distinta (no solo otro color):
+//   Terran  → biomas por altura (mar, playa, pasto, bosque, roca, nieve) + capa de nubes que se desplaza.
+//   Desierto→ estratos de arena con ruido "ridged" y crestas de dunas.
+//   Hielo   → placas de Voronoi con grietas y destellos animados.
+//   Gas     → bandas turbulentas animadas con una tormenta en espiral.
+//   Lava    → corteza de Voronoi con grietas incandescentes que laten (emisivas).
+// Después se aplica el estilo del objeto: escalones de luz (cel shading), semitono y halo.
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn rgb(r: f32, g: f32, b: f32) -> Vector3 {
+    Vector3::new(r, g, b)
+}
+
+fn mix(a: Vector3, b: Vector3, t: f32) -> Vector3 {
+    Vector3::new(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+    )
+}
+
+fn scale(v: Vector3, k: f32) -> Vector3 {
+    Vector3::new(v.x * k, v.y * k, v.z * k)
+}
+
+fn add(a: Vector3, b: Vector3) -> Vector3 {
+    Vector3::new(a.x + b.x, a.y + b.y, a.z + b.z)
+}
+
+fn rotate_forward(v: Vector3, rot: Vector3) -> Vector3 {
+    rotate_x(rotate_y(rotate_z(v, rot.z), rot.y), rot.x)
+}
+
+/// Coordenadas de mapa (u, v) de una dirección unitaria del cuerpo.
+fn map_uv(dir: Vector3) -> (f32, f32) {
+    (
+        dir.z.atan2(dir.x) / (2.0 * std::f32::consts::PI) + 0.5,
+        dir.y.clamp(-1.0, 1.0).asin() / std::f32::consts::PI + 0.5,
+    )
+}
+
+/// Intensidad de luz del fragmento. Si el objeto tiene mapa de normales, la normal se
+/// perturba con las pendientes del mapa (espacio tangente de la esfera: este = longitud
+/// creciente, norte = latitud creciente, llevado a mundo con la rotación del planeta).
+fn lit_intensity(fragment: &Fragment, uniforms: &Uniforms, dir: Vector3) -> f32 {
+    let Some(map) = uniforms.normal_map else {
+        return fragment.intensity;
+    };
+    let east_len = (dir.x * dir.x + dir.z * dir.z).sqrt();
+    if east_len < 1e-3 {
+        return fragment.intensity; // en los polos la base tangente no está definida
+    }
+    let east = Vector3::new(-dir.z / east_len, 0.0, dir.x / east_len);
+    let north = east.cross(dir);
+    let (u, v) = map_uv(dir);
+    let (slope_u, slope_v) = map.sample(u, v);
+
+    let rot = uniforms.object_rotation;
+    let tangent = rotate_forward(east, rot);
+    let bitangent = rotate_forward(north, rot);
+    let n = fragment.normal;
+    let k = map.strength;
+    let perturbed = Vector3::new(
+        n.x - (tangent.x * slope_u + bitangent.x * slope_v) * k,
+        n.y - (tangent.y * slope_u + bitangent.y * slope_v) * k,
+        n.z - (tangent.z * slope_u + bitangent.z * slope_v) * k,
+    );
+    let plen = perturbed.length();
+    if plen < 1e-6 {
+        return fragment.intensity;
+    }
+    let l = fragment.light_dir;
+    ((perturbed.x * l.x + perturbed.y * l.y + perturbed.z * l.z) / plen).clamp(0.38, 1.0)
+}
+
+/// Cel shading: cuantiza la luz en escalones. En el escalón más oscuro puede añadir
+/// puntos de semitono (estilo cómic / Spider-Verse) en una rejilla a 45° en pantalla.
+fn stylize(intensity: f32, fragment: &Fragment, uniforms: &Uniforms) -> f32 {
+    let s = uniforms.style;
+    if s.levels < 1.0 {
+        return intensity;
+    }
+    let t = ((intensity - 0.38) / 0.62).clamp(0.0, 1.0);
+    let band = (t * s.levels).floor().min(s.levels - 1.0);
+    let level = band / (s.levels - 1.0).max(1.0);
+    let mut out = 0.40 + 0.60 * level;
+
+    if band == 0.0 && s.halftone > 0.0 {
+        let (px, py) = (fragment.position.x, fragment.position.y);
+        let a = (px + py) * 0.7071;
+        let b = (px - py) * 0.7071;
+        let cell = 4.0;
+        let du = a.rem_euclid(cell) - cell * 0.5;
+        let dv = b.rem_euclid(cell) - cell * 0.5;
+        if du * du + dv * dv < 1.7 * 1.7 {
+            out *= 1.0 - s.halftone * 0.55;
+        }
+    }
+    out
+}
+
+fn terran_albedo(map: &crate::normal_map::NormalMap, u: f32, v: f32, dir: Vector3, time: f32) -> Vector3 {
+    let h = map.height(u, v) * 1.5;
+    let sea = -0.05;
+    let mut c = if h < sea {
+        mix(rgb(0.03, 0.14, 0.45), rgb(0.12, 0.62, 0.80), smoothstep(-0.7, sea, h))
+    } else if h < 0.04 {
+        rgb(0.88, 0.82, 0.58) // playa
+    } else if h < 0.30 {
+        mix(rgb(0.32, 0.72, 0.30), rgb(0.20, 0.55, 0.26), smoothstep(0.04, 0.30, h))
+    } else if h < 0.50 {
+        rgb(0.13, 0.40, 0.22) // bosque
+    } else if h < 0.65 {
+        rgb(0.50, 0.46, 0.42) // roca
+    } else {
+        rgb(0.95, 0.97, 1.0) // nieve
+    };
+    // Casquetes polares
+    c = mix(c, rgb(0.95, 0.98, 1.0), smoothstep(0.80, 0.92, dir.y.abs()));
+    // Nubes: el patrón horneado se desplaza con el tiempo
+    let cloud = smoothstep(0.55, 0.72, map.detail(u + time * 0.012, v));
+    mix(c, rgb(0.98, 0.99, 1.0), cloud * 0.85)
+}
+
+fn desert_albedo(map: &crate::normal_map::NormalMap, u: f32, v: f32, dir: Vector3) -> Vector3 {
+    let h = map.height(u, v) * 1.5;
+    let ridge = map.detail(u, v).clamp(0.0, 1.0);
+    let strata = (h * 10.0 + ridge * 2.5 + dir.y * 3.0).sin() * 0.5 + 0.5;
+    let sand = rgb(0.93, 0.78, 0.50);
+    let orange = rgb(0.84, 0.48, 0.20);
+    let red = rgb(0.52, 0.22, 0.14);
+    let mut c = mix(sand, orange, strata);
+    c = mix(c, red, smoothstep(0.1, 0.6, -h));
+    // Crestas de duna iluminadas
+    mix(c, scale(sand, 1.08), smoothstep(0.70, 0.95, ridge) * 0.6)
+}
+
+/// Devuelve (albedo, destello). El destello se suma después de la luz.
+fn ice_albedo(map: &crate::normal_map::NormalMap, u: f32, v: f32, time: f32) -> (Vector3, f32) {
+    let edge = map.detail(u, v);
+    let h = map.height(u, v);
+    let crack = 1.0 - smoothstep(0.0, 0.07, edge);
+    let mut base = mix(rgb(0.78, 0.92, 1.0), rgb(0.55, 0.78, 0.97), smoothstep(-0.4, 0.4, h));
+    base = mix(base, rgb(1.0, 1.0, 1.0), smoothstep(0.25, 0.60, h) * 0.7);
+    let c = mix(base, rgb(0.10, 0.28, 0.62), crack * 0.9);
+    let sparkle = ((time * 2.0 + h * 25.0).sin() * 0.5 + 0.5).powi(12) * crack * 0.8;
+    (c, sparkle)
+}
+
+fn gas_albedo(dir: Vector3, time: f32) -> Vector3 {
+    let turb = (dir.x * 3.0 + time * 0.5).sin() * 0.07 + (dir.z * 2.0 - time * 0.3).sin() * 0.05;
+    let lat = dir.y + turb;
+    let band = (lat * 11.0).sin() * 0.5 + 0.5;
+    let fine = (lat * 27.0).sin() * 0.06;
+    let mut c = mix(rgb(0.70, 0.42, 0.25), rgb(0.95, 0.84, 0.62), (band + fine).clamp(0.0, 1.0));
+
+    // Gran tormenta: óvalo con espiral, fija en el planeta (gira con él)
+    let (lat0, lon0) = (-0.30_f32, 0.60_f32);
+    let storm_dir = Vector3::new(lat0.cos() * lon0.cos(), lat0.sin(), lat0.cos() * lon0.sin());
+    let ang = (dir.x * storm_dir.x + dir.y * storm_dir.y + dir.z * storm_dir.z)
+        .clamp(-1.0, 1.0)
+        .acos();
+    let inside = smoothstep(0.30, 0.20, ang);
+    if inside > 0.0 {
+        let swirl = (ang * 26.0 - time * 1.2).sin() * 0.5 + 0.5;
+        c = mix(c, mix(rgb(0.70, 0.18, 0.12), rgb(0.95, 0.55, 0.40), swirl), inside);
+    }
+    c
+}
+
+/// Devuelve (corteza, brillo emisivo).
+fn lava_albedo(map: &crate::normal_map::NormalMap, u: f32, v: f32, time: f32) -> (Vector3, Vector3) {
+    let edge = map.detail(u, v);
+    let h = map.height(u, v);
+    let crust = mix(rgb(0.10, 0.06, 0.06), rgb(0.26, 0.14, 0.10), smoothstep(-0.4, 0.5, h));
+    let width = 0.10 + 0.03 * (time * 1.5 + h * 6.0).sin();
+    let glow = 1.0 - smoothstep(0.0, width, edge);
+    let pulse = 0.85 + 0.15 * (time * 2.0 + h * 8.0).sin();
+    let emissive = scale(mix(rgb(1.0, 0.35, 0.05), rgb(1.0, 0.85, 0.25), glow * glow), glow * pulse);
+    (crust, emissive)
+}
+
 pub fn fragment_shader(fragment: &Fragment, uniforms: &Uniforms) -> Vector3 {
     let time = uniforms.time;
     let p = fragment.world_position;
+    let q = body_coords(p, uniforms);
 
-    match uniforms.shader_kind {
-        ShaderKind::Ship => {
-            let accent = (p.z * 5.0 + time * 1.5).sin().abs();
-            Vector3::new(
-                (fragment.color.x + accent * 0.12).clamp(0.0, 1.0),
-                fragment.color.y,
-                fragment.color.z,
-            )
-        }
-        ShaderKind::Sun => {
-            let pulse = 0.88 + (time * 2.4 + p.y * 3.0).sin() * 0.12;
-            Vector3::new(1.0, 0.48 * pulse + 0.18, 0.05 * pulse)
-        }
-        ShaderKind::Terran => {
-            let continents = (p.x * 4.3 + (p.z * 3.7).sin()).sin() * 0.5 + 0.5;
-            Vector3::new(
-                fragment.color.x * (0.65 + continents * 0.35),
-                fragment.color.y * (0.72 + continents * 0.28),
-                fragment.color.z * (1.0 - continents * 0.35),
-            )
-        }
-        ShaderKind::Desert => {
-            let bands = (p.y * 11.0 + p.x * 1.8).sin() * 0.12 + 0.88;
-            Vector3::new(
-                fragment.color.x * bands,
-                fragment.color.y * bands,
-                fragment.color.z * 0.75,
-            )
-        }
-        ShaderKind::Ice => {
-            let cracks = (p.x * 9.0).sin().abs() * (p.z * 7.0).cos().abs();
-            Vector3::new(
-                (fragment.color.x + cracks * 0.18).clamp(0.0, 1.0),
-                (fragment.color.y + cracks * 0.12).clamp(0.0, 1.0),
-                fragment.color.z,
-            )
-        }
+    // Dirección unitaria del punto en el sistema del cuerpo.
+    let qlen = q.length().max(1e-6);
+    let dir = Vector3::new(q.x / qlen, q.y / qlen, q.z / qlen);
+    let (u, v) = map_uv(dir);
+
+    // El Sol es emisivo: no recibe luz ni estilo.
+    if let ShaderKind::Sun = uniforms.shader_kind {
+        let pulse = 0.88 + (time * 2.4 + q.y * 3.5).sin() * 0.12;
+        let granules = ((q.x * 9.0 + time * 0.8).sin() * (q.z * 8.0 - time * 0.6).sin()) * 0.06;
+        let sun = rgb(1.0, 0.48 * pulse + 0.18 + granules, 0.05 * pulse);
+        // Calor: hacia 1 se vuelve blanco (colapso y explosión); negativo = enfriándose (rojo).
+        let heat = uniforms.heat;
+        let hot = if heat >= 0.0 {
+            mix(sun, rgb(1.0, 0.97, 0.90), heat.min(1.0))
+        } else {
+            mix(sun, rgb(0.45, 0.05, 0.02), (-heat).min(1.0))
+        };
+        return Vector3::new(hot.x.clamp(0.0, 1.0), hot.y.clamp(0.0, 1.0), hot.z.clamp(0.0, 1.0));
     }
+
+    // Luz (con normal perturbada si hay mapa) y su cuantización por escalones.
+    let lit = lit_intensity(fragment, uniforms, dir);
+    let toon = stylize(lit, fragment, uniforms);
+    // Color propio del objeto sin luz (el triángulo ya lo traía multiplicado por la luz).
+    let base = scale(fragment.color, 1.0 / fragment.intensity.max(0.01));
+
+    let mut color = match (uniforms.shader_kind, uniforms.normal_map) {
+        (ShaderKind::Terran, Some(map)) => scale(terran_albedo(map, u, v, dir, time), toon),
+        (ShaderKind::Desert, Some(map)) => scale(desert_albedo(map, u, v, dir), toon),
+        (ShaderKind::Ice, Some(map)) => {
+            let (albedo, sparkle) = ice_albedo(map, u, v, time);
+            add(scale(albedo, toon), rgb(sparkle, sparkle, sparkle))
+        }
+        (ShaderKind::Lava, Some(map)) => {
+            let (crust, emissive) = lava_albedo(map, u, v, time);
+            add(scale(crust, toon), emissive)
+        }
+        (ShaderKind::Gas, _) => scale(gas_albedo(dir, time), toon),
+        // Props de superficie: color plano con leve variación.
+        (ShaderKind::Prop, _) => {
+            let shade = 0.92 + 0.08 * (p.x * 3.0 + p.z * 2.0).sin();
+            scale(base, toon * shade)
+        }
+        // Cristales y luces: brillo animado que se suma a la luz.
+        (ShaderKind::Crystal, _) => {
+            let shimmer = 0.15 + 0.15 * (time * 2.5 + (p.x + p.y + p.z) * 1.7).sin();
+            add(scale(base, toon), rgb(shimmer, shimmer, shimmer))
+        }
+        // Nave y cualquier otro caso: color de la pieza con la luz estilizada.
+        _ => scale(base, toon),
+    };
+
+    // Halo de atmósfera / borde: más fuerte en el lado iluminado y en el contorno.
+    let style = uniforms.style;
+    if style.rim_strength > 0.0 {
+        let c = uniforms.object_center;
+        let r = Vector3::new(p.x - c.x, p.y - c.y, p.z - c.z);
+        let rl = r.length().max(1e-6);
+        let radial = Vector3::new(r.x / rl, r.y / rl, r.z / rl);
+        let e = uniforms.eye;
+        let to_eye = Vector3::new(e.x - p.x, e.y - p.y, e.z - p.z);
+        let el = to_eye.length().max(1e-6);
+        let view = Vector3::new(to_eye.x / el, to_eye.y / el, to_eye.z / el);
+        let fres = (1.0 - (radial.x * view.x + radial.y * view.y + radial.z * view.z).max(0.0)).powf(3.0);
+        let l = fragment.light_dir;
+        let lit_side = smoothstep(-0.2, 0.5, radial.x * l.x + radial.y * l.y + radial.z * l.z);
+        color = add(color, scale(style.rim_color, fres * style.rim_strength * (0.2 + 0.8 * lit_side)));
+    }
+
+    Vector3::new(
+        color.x.clamp(0.0, 1.0),
+        color.y.clamp(0.0, 1.0),
+        color.z.clamp(0.0, 1.0),
+    )
 }

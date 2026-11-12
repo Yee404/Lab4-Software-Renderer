@@ -143,7 +143,16 @@ pub fn triangle(
                           + w2 * v2.transformed_position.z
                           + w3 * v3.transformed_position.z;
 
-                fragments.push(Fragment::new_with_world_pos(p_x, p_y, shaded_color, depth, world_pos));
+                fragments.push(Fragment::new_lit(
+                    p_x,
+                    p_y,
+                    shaded_color,
+                    depth,
+                    world_pos,
+                    normalized_normal,
+                    light_dir,
+                    intensity,
+                ));
             }
         }
     }

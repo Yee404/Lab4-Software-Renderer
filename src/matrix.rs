@@ -87,7 +87,9 @@ pub fn create_model_matrix(translation: Vector3, scale: f32, rotation: Vector3) 
         0.0, 0.0, 0.0, 1.0
     );
 
-    translation_matrix * rotation_matrix * scale_matrix
+    // OJO: en raylib-rs `A * B` equivale (en notación de columnas) a B·A. Para obtener
+    // T·R·S (escalar, rotar y luego trasladar) hay que escribir el producto al revés.
+    scale_matrix * rotation_matrix * translation_matrix
 }
 
 /// Creates a view matrix using camera position, target, and up vector
